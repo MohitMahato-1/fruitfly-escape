@@ -2,6 +2,8 @@
 four strong connections, and the strong connections between them. Runs the looming test on it
 next to the whole brain and measures its speed relative to real time."""
 import time
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -9,8 +11,53 @@ import pandas as pd
 import brain
 
 CIRCUIT = brain.DATA / 'escape-circuit-male-cns-v1.0.npz'
+METADATA = brain.DATA / 'escape-circuit-male-cns-v1.0.metadata.json'
 MIN_SYNAPSES = 5
 MAX_STEPS = 4
+
+
+def ids_digest(ids):
+    """Stable fingerprint of the ordered body IDs used by a cached matrix."""
+    return hashlib.sha256(np.asarray(ids, dtype='<i8').tobytes()).hexdigest()
+
+
+def save_metadata(ids, types, path=None):
+    """Save only the cell labels needed by the demo, with their data provenance."""
+    path = METADATA if path is None else path
+    metadata = {
+        'schema_version': 1,
+        'dataset': 'MaleCNS v1.0',
+        'source': 'https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/body-annotations-male-cns-v1.0-minconf-0.5.feather',
+        'body_ids_sha256': ids_digest(ids),
+        'neuron_count': len(ids),
+        'cell_types': {name: np.asarray(ids)[np.asarray(types) == name].tolist()
+                       for name in ('LPLC2', 'DNp01')},
+    }
+    path.write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+
+
+def cell_types(ids):
+    """Read demo labels from the matching small cache, or the full annotations."""
+    if not METADATA.exists():
+        if brain.ANNOTATIONS.exists():
+            return brain.cell_types(ids)
+        raise FileNotFoundError('Missing circuit metadata. Restore data/' + METADATA.name
+                                + ' from the repository, or download the neuron annotations.')
+    metadata = json.loads(METADATA.read_text(encoding='utf-8'))
+    if (metadata.get('schema_version') != 1 or metadata.get('neuron_count') != len(ids)
+            or metadata.get('body_ids_sha256') != ids_digest(ids)):
+        raise ValueError('Circuit metadata does not match the cached neuron IDs; rebuild the circuit.')
+    types = pd.Series(None, index=np.asarray(ids), dtype=object)
+    seen = set()
+    for name in ('LPLC2', 'DNp01'):
+        members = metadata.get('cell_types', {}).get(name, [])
+        if not members or len(set(members)) != len(members) or seen.intersection(members):
+            raise ValueError('Invalid or missing ' + name + ' labels in circuit metadata.')
+        if not np.isin(members, ids).all():
+            raise ValueError('Circuit metadata contains unknown neuron IDs.')
+        seen.update(members)
+        types.loc[members] = name
+    return types.reset_index(drop=True)
 
 
 def steps(A, sources):
@@ -42,6 +89,7 @@ def escape_circuit():
     keep = np.flatnonzero(from_lplc2 + to_dnp01 <= MAX_STEPS)
     C = strong[keep][:, keep]
     brain.save_matrix(CIRCUIT, C, ids[keep])
+    save_metadata(ids[keep], types.iloc[keep])
     return C, ids[keep]
 
 

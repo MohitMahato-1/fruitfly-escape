@@ -2,3 +2,5 @@
 __pycache__/
 data/*
 !data/escape-circuit-male-cns-v1.0.npz
+!data/escape-circuit-male-cns-v1.0.metadata.json
+*.pyc

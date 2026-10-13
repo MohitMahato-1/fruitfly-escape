@@ -3,6 +3,7 @@ takes off when the giant fiber (DNp01) fires 3 spikes within 20 ms."""
 import argparse
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -154,12 +155,16 @@ def main():
     parser.add_argument('--source', help='video file instead of the webcam')
     parser.add_argument('--headless', action='store_true', help='no window')
     parser.add_argument('--wiring', choices=['intact', 'shuffled'], default='intact')
+    parser.add_argument('--record', type=Path, help='save annotated video as an MP4')
+    parser.add_argument('--snapshot', type=Path, help='save a PNG of a highest-threat frame')
     args = parser.parse_args()
 
     C, ids = circuit.escape_circuit()
-    types = brain.cell_types(ids)
+    types = circuit.cell_types(ids)
     lplc2 = np.flatnonzero(types == 'LPLC2')
     gf_row = np.full(C.shape[0], -1)
+    if np.count_nonzero(types == 'DNp01') != 2:
+        raise ValueError('This demo expects the two DNp01 neurons in the supplied circuit.')
     gf_row[np.flatnonzero(types == 'DNp01')] = [0, 1]
     is_lplc2 = np.zeros(C.shape[0], bool)
     is_lplc2[lplc2] = True
@@ -177,6 +182,17 @@ def main():
     if webcam:
         frame = cv2.flip(frame, 1)
     h, w = frame.shape[:2]
+    writer = None
+    if args.record:
+        args.record.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(str(args.record), cv2.VideoWriter_fourcc(*'mp4v'), fps,
+                                 (w + PANEL_WIDTH, h))
+        if not writer.isOpened():
+            cap.release()
+            raise SystemExit('Could not create video: ' + str(args.record))
+    if args.snapshot:
+        args.snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_threat = -1.0
     proc_size = (PROC_WIDTH, round(h * PROC_WIDTH / w))
     scale = w / PROC_WIDTH
     to_gray = lambda f: cv2.cvtColor(cv2.resize(f, proc_size), cv2.COLOR_BGR2GRAY)
@@ -245,14 +261,23 @@ def main():
             while raster and raster[0][0] <= now - RASTER_MS:
                 raster.popleft()
 
-            if args.headless:
+            if args.headless and writer is None and args.snapshot is None:
                 continue
             draw_fly(frame, fly)
             if seizure:
                 cv2.putText(frame, 'SEIZURE', (w // 2 - 170, 90), cv2.FONT_HERSHEY_DUPLEX, 2.5,
                             (0, 0, 255), 5, cv2.LINE_AA)
             panel = draw_panel(h, wiring, threat, lplc2_history, raster, now, (escapes, swats, spasms))
-            cv2.imshow('Swat the fly', np.hstack([frame, panel]))
+            rendered = np.hstack([frame, panel])
+            if writer is not None:
+                writer.write(rendered)
+            if args.snapshot and threat >= snapshot_threat:
+                if not cv2.imwrite(str(args.snapshot), rendered):
+                    raise OSError('Could not save snapshot: ' + str(args.snapshot))
+                snapshot_threat = threat
+            if args.headless:
+                continue
+            cv2.imshow('Swat the fly', rendered)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), 27):
                 break
@@ -262,11 +287,16 @@ def main():
                 gf_recent.clear()
                 raster.clear()
                 step_spikes.clear()
-                fly.update(now)
+                lplc2_history.clear()
+                fly = Fly((w / 2, h / 2), (w, h))
+                escapes = swats = spasms = 0
     except KeyboardInterrupt:
         pass
-    cap.release()
-    cv2.destroyAllWindows()
+    finally:
+        cap.release()
+        if writer is not None:
+            writer.release()
+        cv2.destroyAllWindows()
     print(f'{wiring}: {escapes} escapes, {swats} swats, {spasms} spasms')
 
 
